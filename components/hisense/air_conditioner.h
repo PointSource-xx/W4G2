@@ -3,6 +3,7 @@
 #include "esphome/components/climate/climate.h"
 #include "esphome/components/uart/uart.h"
 #include "esphome/core/component.h"
+#include "capabilities.h"
 
 #include <string>
 #include <vector>
@@ -71,6 +72,7 @@ class AirConditioner : public uart::UARTDevice, public Component, public climate
 
 #ifdef USE_TEXT_SENSOR
   void set_faults_text_sensor(text_sensor::TextSensor *s) { this->faults_text_sensor_ = s; }
+  void set_identity_text_sensor(text_sensor::TextSensor *s) { this->identity_text_sensor_ = s; }
 #endif
 #ifdef USE_BINARY_SENSOR
   /// Status byte 36 bit 3: the unit was controlled by its IR remote or buttons since the previous command.
@@ -87,6 +89,9 @@ class AirConditioner : public uart::UARTDevice, public Component, public climate
 #ifdef USE_SELECT
   void set_sleep_profile_select(select::Select *s) { this->sleep_profile_select_ = s; }
 #endif
+  /// 0 = detect from the unit (default), otherwise force 3 or 5 fan speeds.
+  void set_fan_speeds(uint8_t speeds) { this->fan_speeds_config_ = speeds; }
+  const HisenseCapabilities &get_capabilities() const { return this->caps_; }
 
   // On/off timers (control bytes 27/28 and 29/30, status bytes 28/29 and 30/31).
   static const uint16_t TIMER_MAX_MINUTES = 24 * 60 - 1;
@@ -140,9 +145,24 @@ class AirConditioner : public uart::UARTDevice, public Component, public climate
   ParseStatus check_frame_();
   void decode_message(const std::vector<uint8_t> &payload);
   void decode_features_(const std::vector<uint8_t> &payload);
+  climate::ClimateAction decode_action_(const std::vector<uint8_t> &payload);
   void decode_faults_(const std::vector<uint8_t> &payload);
 
   void send_status();
+
+  // Identification queries sent once at start-up (version, device type, capabilities).
+  static const uint8_t IDENTITY_STEPS = 3;
+  uint8_t identity_step_{0};
+  uint8_t identity_attempts_{0};
+  void send_identity_query_();
+  bool handle_identity_reply_(const std::vector<uint8_t> &payload);
+  void identity_done_();
+  HisenseCapabilities caps_;
+  uint8_t fan_speeds_config_{0};
+  bool three_speed_fan_() const {
+    return this->fan_speeds_config_ ? this->fan_speeds_config_ == 3 : this->caps_.three_speed_fan();
+  }
+  bool legacy_power_wide_{false};  // stock firmware's sticky flag for the old power format
 
   std::vector<uint8_t> rx_buffer_;  // unstuffed frame being received
   bool rx_in_frame_{false};
@@ -168,6 +188,7 @@ class AirConditioner : public uart::UARTDevice, public Component, public climate
 
 #ifdef USE_TEXT_SENSOR
   text_sensor::TextSensor *faults_text_sensor_{nullptr};
+  text_sensor::TextSensor *identity_text_sensor_{nullptr};
 #endif
 #ifdef USE_BINARY_SENSOR
   binary_sensor::BinarySensor *remote_used_binary_sensor_{nullptr};

@@ -3,6 +3,7 @@
 #include "esphome/core/log.h"
 
 #include <cmath>
+#include <cstdio>
 
 #ifdef USE_LIBRETINY_VARIANT_RTL8710B
 #include "esphome/components/uart/uart_component_libretiny.h"
@@ -97,6 +98,25 @@ void AirConditioner::loop() {
     send_status();
     change_status(Status::waiting_for_change_confirm);
     return;
+  }
+
+  // Identify the unit once at start-up, before normal status polling.
+  if (this->identity_step_ < IDENTITY_STEPS) {
+    if (status == Status::standby) {
+      this->send_identity_query_();
+      change_status(Status::waiting_for_status_response);
+      return;
+    }
+    if (status == Status::waiting_for_status_response && millis() - this->last_send_ > 1500) {
+      if (++this->identity_attempts_ >= 3) {
+        ESP_LOGW(TAG, "No reply to identity query %u, skipping", this->identity_step_);
+        this->identity_attempts_ = 0;
+        if (++this->identity_step_ >= IDENTITY_STEPS)
+          this->identity_done_();
+      }
+      change_status(Status::standby);
+      return;
+    }
   }
 
   // A frame that stopped mid-way, or a request that got no reply: recover quickly
@@ -207,7 +227,9 @@ ParseStatus AirConditioner::check_frame_() {
   std::vector<uint8_t> payload(buf.begin() + 2, buf.end() - 4);
   ESP_LOGV(TAG, "Frame OK (%u bytes): %s", (unsigned) payload.size(), format_hex_pretty(payload).c_str());
 
-  if (payload.size() > 12 && (payload[11] == 0x66 || payload[11] == 0x65) && payload[12] == 0x00) {
+  if (this->handle_identity_reply_(payload)) {
+    // handled
+  } else if (payload.size() > 12 && (payload[11] == 0x66 || payload[11] == 0x65) && payload[12] == 0x00) {
     // 0x66 = status reply; 0x65 = reply to a control command, which carries the
     // full status in the same layout (verified live).
     this->decode_message(payload);
@@ -224,14 +246,118 @@ ParseStatus AirConditioner::check_frame_() {
   return ParseStatus::PARSE_OK;
 }
 
-void AirConditioner::update_custom_fan_modes_() { this->set_supported_custom_fan_modes({FAN_LOWER, FAN_HIGHER}); }
+void AirConditioner::dump_config() {
+  ESP_LOGCONFIG(TAG, "Hisense:");
+  LOG_PIN("  Flow Control Pin: ", this->flow_control_pin_);
+  const auto &c = this->caps_;
+  ESP_LOGCONFIG(TAG, "  Device type: %u/%u, product type: %d", c.device_type, c.device_subtype, c.product_type);
+  ESP_LOGCONFIG(TAG, "  Software: %u, protocol: %u", c.software_version, c.protocol_version);
+  ESP_LOGCONFIG(TAG, "  Fan speeds: %u%s", this->three_speed_fan_() ? 3 : 5,
+                this->fan_speeds_config_ ? " (configured)" : "");
+}
+
+void AirConditioner::send_identity_query_() {
+  // Same header as the status request; payload is cmd, sub, 0.
+  static const uint8_t QUERIES[IDENTITY_STEPS][2] = {{0x07, 0x01}, {0x0A, 0x04}, {0x66, 0x40}};
+  const uint8_t *q = QUERIES[this->identity_step_];
+  std::vector<uint8_t> frame{0xF4, 0xF5, 0x00, 0x40, 0x0B, 0x00, 0x00, 0x01, 0x01, 0xFE, 0x01, 0x00, 0x00, q[0], q[1], 0x00};
+  ESP_LOGD(TAG, "Identity query %02X %02X", q[0], q[1]);
+  this->send_raw(frame);
+}
+
+bool AirConditioner::handle_identity_reply_(const std::vector<uint8_t> &payload) {
+  if (payload.size() < 13)
+    return false;
+  const uint8_t cmd = payload[11], sub = payload[12];
+  auto &c = this->caps_;
+  uint8_t step;
+  if (cmd == 0x07 && sub == 0x01) {
+    if (payload.size() < 18)
+      return false;
+    c.software_version = (payload[14] << 8) | payload[15];
+    c.protocol_version = (payload[16] << 8) | payload[17];
+    step = 0;
+  } else if (cmd == 0x0A && sub == 0x04) {
+    if (payload.size() < 16)
+      return false;
+    c.device_type = payload[14];
+    c.device_subtype = payload[15];
+    step = 1;
+  } else if (cmd == 0x66 && sub == 0x40) {
+    const uint8_t dev = c.device_type ? c.device_type : 1;
+    c.product_type = decode_product_type(dev, payload.data() + 11, payload.size() - 11);
+    step = 2;
+  } else {
+    return false;
+  }
+  if (step == this->identity_step_) {
+    this->identity_attempts_ = 0;
+    if (++this->identity_step_ >= IDENTITY_STEPS)
+      this->identity_done_();
+  }
+  return true;
+}
+
+void AirConditioner::identity_done_() {
+  const auto &c = this->caps_;
+  this->update_custom_fan_modes_();
+  ESP_LOGI(TAG, "Unit: device type %u/%u, product type %d, software %u, protocol %u, %u fan speeds", c.device_type,
+           c.device_subtype, c.product_type, c.software_version, c.protocol_version, this->three_speed_fan_() ? 3 : 5);
+  if (!c.is_supported_device())
+    ESP_LOGW(TAG, "Device type %u is not an air conditioner this component supports", c.device_type);
+#ifdef USE_TEXT_SENSOR
+  if (this->identity_text_sensor_ != nullptr) {
+    char buf[96];
+    snprintf(buf, sizeof(buf), "type %u/%u, product %d, sw %u, protocol %u", c.device_type, c.device_subtype,
+             c.product_type, c.software_version, c.protocol_version);
+    this->identity_text_sensor_->publish_state(buf);
+  }
+#endif
+}
+
+climate::ClimateAction AirConditioner::decode_action_(const std::vector<uint8_t> &payload) {
+  if (this->mode == climate::CLIMATE_MODE_OFF)
+    return climate::CLIMATE_ACTION_OFF;
+  // payload[14] == 0: indoor fan stopped (pre-heat after switching to heat,
+  // mode transitions). payload[39]/[41]: compressor target / ramping output
+  // frequency, both 0 when the compressor is stopped (verified live).
+  const bool fan_running = payload[14] != 0;
+  const bool compressor = payload.size() > 41 && (payload[39] != 0 || payload[41] != 0);
+  if (compressor) {
+    switch (this->mode) {
+      case climate::CLIMATE_MODE_COOL:
+        return climate::CLIMATE_ACTION_COOLING;
+      case climate::CLIMATE_MODE_HEAT:
+        return climate::CLIMATE_ACTION_HEATING;
+      case climate::CLIMATE_MODE_DRY:
+        return climate::CLIMATE_ACTION_DRYING;
+      case climate::CLIMATE_MODE_AUTO:
+        // Auto picks cooling or heating itself: tell from the indoor coil.
+        if (payload[19] != 0x80 && payload[18] != 0x80)
+          return payload[19] > payload[18] ? climate::CLIMATE_ACTION_HEATING : climate::CLIMATE_ACTION_COOLING;
+        break;
+      default:
+        break;
+    }
+  }
+  return fan_running ? climate::CLIMATE_ACTION_FAN : climate::CLIMATE_ACTION_IDLE;
+}
+
+void AirConditioner::update_custom_fan_modes_() {
+  if (this->three_speed_fan_()) {
+    this->set_supported_custom_fan_modes(std::vector<const char *>{});
+  } else {
+    this->set_supported_custom_fan_modes({FAN_LOWER, FAN_HIGHER});
+  }
+}
 
 optional<uint8_t> AirConditioner::fan_code_from_call_(const climate::ClimateCall &call) {
+  const bool three = this->three_speed_fan_();
   if (call.has_custom_fan_mode()) {
     auto name = call.get_custom_fan_mode();
-    if (name == FAN_LOWER)
+    if (!three && name == FAN_LOWER)
       return 5;
-    if (name == FAN_HIGHER)
+    if (!three && name == FAN_HIGHER)
       return 9;
     return {};
   }
@@ -241,11 +367,11 @@ optional<uint8_t> AirConditioner::fan_code_from_call_(const climate::ClimateCall
     case climate::CLIMATE_FAN_AUTO:
       return 1;
     case climate::CLIMATE_FAN_LOW:
-      return 6;
+      return three ? 2 : 6;
     case climate::CLIMATE_FAN_MEDIUM:
-      return 7;
+      return three ? 3 : 7;
     case climate::CLIMATE_FAN_HIGH:
-      return 8;
+      return three ? 4 : 8;
     default:
       return {};
   }
@@ -299,7 +425,7 @@ climate::ClimateTraits AirConditioner::traits() {
   traits.set_supported_swing_modes({climate::CLIMATE_SWING_OFF, climate::CLIMATE_SWING_BOTH,
                                     climate::CLIMATE_SWING_VERTICAL, climate::CLIMATE_SWING_HORIZONTAL});
 
-  traits.add_feature_flags(climate::CLIMATE_SUPPORTS_CURRENT_TEMPERATURE);
+  traits.add_feature_flags(climate::CLIMATE_SUPPORTS_CURRENT_TEMPERATURE | climate::CLIMATE_SUPPORTS_ACTION);
   traits.set_visual_min_temperature(16.0f);
   traits.set_visual_max_temperature(32.0f);
   traits.set_visual_target_temperature_step(1.0f);
@@ -492,10 +618,6 @@ void AirConditioner::set_sleep_profile(uint8_t profile, bool send) {
     this->pending_settings_().sleep = profile;
 }
 
-void AirConditioner::dump_config() {
-  ESP_LOGCONFIG(TAG, "Hisense:");
-  LOG_PIN("  Flow Control Pin: ", this->flow_control_pin_);
-}
 
 void AirConditioner::send_raw(const std::vector<uint8_t> &payload) {
   if (payload.size() < 2)
@@ -552,6 +674,7 @@ void AirConditioner::decode_message(const std::vector<uint8_t> &payload) {
 
   this->target_temperature = payload[17];
   this->current_temperature = payload[18] <= 128 ? (float) payload[18] : NAN;
+  this->action = this->decode_action_(payload);
 
   // payload[14] = fan code << 1. Some units report auto as 0x01. 0 while off: keep last.
   if (payload[14] == 0x01) {
@@ -635,12 +758,27 @@ void AirConditioner::decode_message(const std::vector<uint8_t> &payload) {
   if (payload.size() > 48)
     update_sub_sensor_(SubSensorType::SUPPLY_VOLTAGE, (float) ((payload[47] << 8) | payload[48]));
   // f_electricity in the stock firmware (units not confirmed).
-  if (payload.size() > 143) {
-    // Little-endian: byte 142 is the low byte. It is a copy of bytes 53:54
-    // (big-endian) on the units seen so far, e.g. 53:54 = 06 40, 142:143 = 40 06.
-    uint16_t power = (payload[143] << 8) | payload[142];
-    ESP_LOGV(TAG, "Power raw 0x%04X", power);
-    update_sub_sensor_(SubSensorType::POWER, (float) power);
+  if (this->caps_.power_in_extended_frame()) {
+    if (payload.size() > 143) {
+      // Little-endian: byte 142 is the low byte. It is a copy of bytes 53:54
+      // (big-endian) on the units seen so far, e.g. 53:54 = 06 40, 142:143 = 40 06.
+      uint16_t power = (payload[143] << 8) | payload[142];
+      ESP_LOGV(TAG, "Power raw 0x%04X", power);
+      update_sub_sensor_(SubSensorType::POWER, (float) power);
+    }
+  } else if (payload.size() > 55) {
+    // Protocol < 534: bytes 53-55, decoded the way the stock firmware does.
+    const uint8_t p53 = payload[53], p54 = payload[54], p55 = payload[55];
+    float power;
+    if (p55 != 0) {
+      power = p53 * 3.0f;
+    } else if (p54 != 0 || this->legacy_power_wide_) {
+      this->legacy_power_wide_ = true;
+      power = (float) ((p53 << 8) | p54);
+    } else {
+      power = p53;
+    }
+    update_sub_sensor_(SubSensorType::POWER, power);
   }
 #endif
 }

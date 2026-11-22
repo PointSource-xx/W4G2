@@ -108,6 +108,12 @@ switch:
 ## Additional options and entities
 
 ```yaml
+climate:
+  - platform: hisense
+    # ...
+    # Optional. "auto" (default) detects the fan type from the unit, "3" or "5" forces it.
+    fan_speeds: auto
+
 sensor:
   - platform: hisense
     hisense_id: hisense_ac
@@ -129,6 +135,8 @@ text_sensor:
     hisense_id: hisense_ac
     faults:               # "OK" or a list of active fault flags
       name: Faults
+    identity:             # device type, product type, software and protocol version
+      name: AC Identity
 
 binary_sensor:
   - platform: hisense
@@ -185,6 +193,22 @@ it). Turning it off sends that byte as `00`: verified on a unit, the command sti
 and the unit stays silent. The unit does not report it, so it is restored from
 flash at boot (`restore_mode`, default `RESTORE_DEFAULT_ON`).
 
+### Unit identification
+
+At start-up the component asks the indoor unit for its version (`07 01`), device type
+(`0A 04`) and capability bits (`66 40`), the same read-only queries the stock WiFi module
+sends. The capability bits are turned into the stock firmware's "product type" with a table
+ported from that firmware (`capabilities.h`). These values select:
+
+* 3-speed (values 2/3/4) or 5-speed (values 5..9) fan encoding. 3-speed is used for split
+  units with protocol <= 532 or product types 102/103/106/107.
+* The power format: status bytes 142-143 for protocol >= 534, or bytes 53-55 for older units.
+  Bytes 142-143 are little-endian (142 is the low byte): on the units seen so far they repeat
+  bytes 53-54 (big-endian) byte-swapped, e.g. 53:54 = `06 40` and 142:143 = `40 06` = 1600.
+
+The result is logged at boot and in `dump_config`. You can also see it with the `identity`
+text sensor. If your unit reports something unexpected, please include that line in issues.
+
 ## LibreTiny (RTL8710BN) UART issues: handled by the component
 
 On RTL8710B the component works around two LibreTiny bugs itself. No YAML lambdas are needed:
@@ -203,6 +227,8 @@ builds do not apply it, and it does not fix the race above.
 
 * `outdoor_temperature` and `outdoor_coil_temperature` are read from status bytes 42/43.
   Earlier versions read bytes 40/41, which are compressor frequencies.
+* The climate action comes from the compressor (bytes 39/41) and the fan status. Fan code 0
+  means the indoor fan is stopped (when off, in transitions, and during pre-heat).
 
 * The unit answers every control command (0x65) with a full status frame in the same layout
   as the 0x66 reply. The component uses it to confirm changes within about 0.5 s.
@@ -211,3 +237,10 @@ builds do not apply it, and it does not fix the race above.
   finished, and changes made in quick succession are merged.
 * The display is reported off while the unit is off and comes back on at power-on. The display
   bits are therefore sent only when the display switch changes.
+* Turbo makes the unit set the fan to high and the setpoint to 16 °C. Sleep drops the fan to low.
+  This is the unit's own behaviour.
+
+## Protocol
+
+The serial protocol (frame format, status and control fields, sources) is described in
+[protocol.md](protocol.md).
