@@ -4,6 +4,7 @@
 #include "esphome/components/uart/uart.h"
 #include "esphome/core/component.h"
 
+#include <string>
 #include <vector>
 
 #ifdef USE_SENSOR
@@ -11,6 +12,18 @@
 #endif
 #ifdef USE_SWITCH
 #include "esphome/components/switch/switch.h"
+#endif
+#ifdef USE_TEXT_SENSOR
+#include "esphome/components/text_sensor/text_sensor.h"
+#endif
+#ifdef USE_BINARY_SENSOR
+#include "esphome/components/binary_sensor/binary_sensor.h"
+#endif
+#ifdef USE_SELECT
+#include "esphome/components/select/select.h"
+#endif
+#ifdef USE_NUMBER
+#include "esphome/components/number/number.h"
 #endif
 
 namespace esphome {
@@ -44,7 +57,9 @@ class AirConditioner : public uart::UARTDevice, public Component, public climate
   uint8_t waiting_for_response{0};
 
   // Toggleable features exposed as switches.
-  enum class Feature : uint8_t { FEATURE_DISPLAY = 0, FEATURE_COUNT };
+  enum class Feature : uint8_t { FEATURE_DISPLAY = 0, FEATURE_ECO, FEATURE_TURBO, FEATURE_QUIET, FEATURE_SLEEP,
+                              FEATURE_BEEP,  // local setting: beep flag (T23 bit 2) on our commands
+                              FEATURE_COUNT };
   void set_feature(Feature feature, bool state);
   void set_display_switch(bool state) { this->set_feature(Feature::FEATURE_DISPLAY, state); }
 
@@ -52,6 +67,33 @@ class AirConditioner : public uart::UARTDevice, public Component, public climate
   void set_feature_switch(Feature feature, switch_::Switch *sw) {
     this->feature_switches_[static_cast<size_t>(feature)] = sw;
   }
+#endif
+
+#ifdef USE_TEXT_SENSOR
+  void set_faults_text_sensor(text_sensor::TextSensor *s) { this->faults_text_sensor_ = s; }
+#endif
+#ifdef USE_BINARY_SENSOR
+  /// Status byte 36 bit 3: the unit was controlled by its IR remote or buttons since the previous command.
+  void set_remote_used_binary_sensor(binary_sensor::BinarySensor *s) { this->remote_used_binary_sensor_ = s; }
+#endif
+
+  // Sleep profiles reported in status byte 15 (value >> 1) and sent in control
+  // byte 17 ((profile << 1) | 1). 0 = sleep off.
+  // Profiles 1..4 are General, Elderly, Young, Child (stock firmware names); the
+  // select platform lists them in that order.
+  static const uint8_t SLEEP_PROFILE_COUNT = 4;
+  /// Profile (1..4) used when sleep is switched on. Sent at once if sleep is on and send is true.
+  void set_sleep_profile(uint8_t profile, bool send);
+#ifdef USE_SELECT
+  void set_sleep_profile_select(select::Select *s) { this->sleep_profile_select_ = s; }
+#endif
+
+  // On/off timers (control bytes 27/28 and 29/30, status bytes 28/29 and 30/31).
+  static const uint16_t TIMER_MAX_MINUTES = 24 * 60 - 1;
+  /// Set the on (off = false) or off timer to run out in `minutes`; 0 cancels it.
+  void set_timer(bool off, uint16_t minutes);
+#ifdef USE_NUMBER
+  void set_timer_number(bool off, number::Number *n) { this->timer_numbers_[off ? 1 : 0] = n; }
 #endif
 
 #ifdef USE_SENSOR
@@ -72,6 +114,11 @@ class AirConditioner : public uart::UARTDevice, public Component, public climate
     COMPRESSOR_FREQUENCY,
     COMPRESSOR_CURRENT,
     EXPANSION_VALVE_OPEN_DEGREE,
+    // Added from stock firmware analysis
+    SUPPLY_VOLTAGE,
+    DISCHARGE_TEMPERATURE,
+    SETPOINT,
+    TEMPERATURE_COMPENSATION,
     SUB_SENSOR_TYPE_COUNT,
     BIG_DATA_FRAME_SUB_SENSORS = INDOOR_COIL_TEMPERATURE,
   };
@@ -93,6 +140,7 @@ class AirConditioner : public uart::UARTDevice, public Component, public climate
   ParseStatus check_frame_();
   void decode_message(const std::vector<uint8_t> &payload);
   void decode_features_(const std::vector<uint8_t> &payload);
+  void decode_faults_(const std::vector<uint8_t> &payload);
 
   void send_status();
 
@@ -105,7 +153,10 @@ class AirConditioner : public uart::UARTDevice, public Component, public climate
   uint32_t last_status_change{0};
 
   bool display_enable{true};  // Status of display screen of AC unit.
+  bool beep_enable_{true};    // Ask the unit to beep when it accepts a command (T23 bit 2)
   uint8_t settling_features_{0};  // Feature bits changed by the last command, not yet confirmed by a poll
+  uint8_t sleep_profile_{1};      // profile used when sleep is switched on
+  uint8_t sleep_reported_{0};     // profile last reported by the unit, 0 = off
 
   uint16_t checksum(const std::vector<uint8_t> &payload);
   void change_status(Status status);
@@ -113,6 +164,19 @@ class AirConditioner : public uart::UARTDevice, public Component, public climate
 #ifdef USE_SWITCH
   switch_::Switch *feature_switches_[static_cast<size_t>(Feature::FEATURE_COUNT)]{};
   void publish_feature_(Feature feature, bool state);
+#endif
+
+#ifdef USE_TEXT_SENSOR
+  text_sensor::TextSensor *faults_text_sensor_{nullptr};
+#endif
+#ifdef USE_BINARY_SENSOR
+  binary_sensor::BinarySensor *remote_used_binary_sensor_{nullptr};
+#endif
+#ifdef USE_SELECT
+  select::Select *sleep_profile_select_{nullptr};
+#endif
+#ifdef USE_NUMBER
+  number::Number *timer_numbers_[2]{};  // on, off
 #endif
 
 #ifdef USE_SENSOR
@@ -128,6 +192,11 @@ class AirConditioner : public uart::UARTDevice, public Component, public climate
     esphome::optional<float> target_temperature;
     esphome::optional<esphome::climate::ClimatePreset> preset;
     esphome::optional<bool> display;
+    esphome::optional<bool> eco;
+    esphome::optional<bool> turbo;
+    esphome::optional<bool> quiet;
+    esphome::optional<uint8_t> sleep;  // sleep profile, 0 = off
+    esphome::optional<uint16_t> timer[2];  // on, off: minutes from now, 0 = cancel
 
     HvacSettings(){};
     HvacSettings(const HvacSettings &) = default;

@@ -105,6 +105,86 @@ switch:
       name: Hisens Display Enable
 
 ```
+## Additional options and entities
+
+```yaml
+sensor:
+  - platform: hisense
+    hisense_id: hisense_ac
+    supply_voltage:       # mains voltage reported by the unit
+      name: Supply Voltage
+    power:                # raw "f_electricity" value from the stock firmware (unit unknown; diagnostic)
+      name: Power
+    compressor_frequency: # compressor output frequency in Hz (0 when stopped)
+      name: Compressor Frequency
+    discharge_temperature: # compressor discharge temperature in °C
+      name: Discharge Temperature
+    setpoint:             # diagnostic: setpoint as reported by the unit, for graphing
+      name: Setpoint
+    temperature_compensation: # diagnostic: auto/dry compensation, raw value (encoding unknown)
+      name: Temperature Compensation
+
+text_sensor:
+  - platform: hisense
+    hisense_id: hisense_ac
+    faults:               # "OK" or a list of active fault flags
+      name: Faults
+
+binary_sensor:
+  - platform: hisense
+    hisense_id: hisense_ac
+    remote_used:          # diagnostic: unit was controlled by its IR remote or keys
+      name: Remote Used
+
+switch:
+  - platform: hisense
+    hisense_id: hisense_ac
+    eco:
+      name: Eco
+    turbo:
+      name: Turbo
+    quiet:
+      name: Quiet
+    sleep:
+      name: Sleep
+    beep:                 # optional; default on, restored across reboots
+      name: Beep
+
+number:
+  - platform: hisense
+    hisense_id: hisense_ac
+    timer_on:             # minutes until the unit turns on; 0 cancels. Shows remote timers too
+      name: Timer On
+    timer_off:            # minutes until the unit turns off; 0 cancels
+      name: Timer Off
+
+select:
+  - platform: hisense
+    hisense_id: hisense_ac
+    sleep_profile:        # General, Elderly, Young or Child; used by the sleep switch
+      name: Sleep Profile
+```
+
+`sleep_profile` picks which of the unit's four sleep curves the `sleep` switch turns on
+(control byte 17 = `(profile << 1) | 1`, status byte 15 = `profile << 1`). Changing it while
+sleep is on switches the unit to the new profile. While sleep is on, the select shows the
+profile the unit reports, so a profile chosen with the remote shows up too. The last choice is
+restored at boot.
+
+`timer_on` / `timer_off` set the unit's own on and off timers, in minutes from now (up to
+23 h 59 min). Setting 0 cancels the timer. They show the time left, including for timers set
+with the remote. The unit counts down once a minute, so a timer can fire up to a minute early.
+
+`remote_used` reads status byte 36 bit 3, which other implementations describe as "IR remote
+or key control before this command". It has never been seen set on product type 104 (it stays
+off through remote commands), but may work on other units.
+
+`beep` is a local setting, not a unit state: it sets byte 23 bit 2 of the commands sent from
+ESPHome, which asks the unit to beep when it accepts the command (the stock module always sets
+it). Turning it off sends that byte as `00`: verified on a unit, the command still applies
+and the unit stays silent. The unit does not report it, so it is restored from
+flash at boot (`restore_mode`, default `RESTORE_DEFAULT_ON`).
+
 ## LibreTiny (RTL8710BN) UART issues: handled by the component
 
 On RTL8710B the component works around two LibreTiny bugs itself. No YAML lambdas are needed:

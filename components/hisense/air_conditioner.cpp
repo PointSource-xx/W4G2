@@ -319,7 +319,8 @@ void AirConditioner::send_status() {
   std::vector<uint8_t> status(46, 0x00);
   const uint8_t header[] = {0xF4, 0xF5, 0x00, 0x40, 0x29, 0x00, 0x00, 0x01, 0x01, 0xFE, 0x01, 0x00, 0x00, 0x65};
   std::copy(std::begin(header), std::end(header), status.begin());
-  status[23] = 0x04;
+  // Byte 23 bit 2: the unit beeps when it accepts the frame (stock module always sets it).
+  status[23] = this->beep_enable_ ? 0x04 : 0x00;
 
   if (next_hvac_settings.mode != nullopt) {
     if (next_hvac_settings.mode.value() == climate::CLIMATE_MODE_OFF) {
@@ -380,6 +381,48 @@ void AirConditioner::send_status() {
   auto settling = [this](Feature f) { this->settling_features_ |= 1u << static_cast<uint8_t>(f); };
   if (next_hvac_settings.display.has_value())
     settling(Feature::FEATURE_DISPLAY);
+  if (next_hvac_settings.sleep.has_value())
+    settling(Feature::FEATURE_SLEEP);
+  if (next_hvac_settings.turbo.has_value())
+    settling(Feature::FEATURE_TURBO);
+  if (next_hvac_settings.eco.has_value())
+    settling(Feature::FEATURE_ECO);
+  if (next_hvac_settings.quiet.has_value())
+    settling(Feature::FEATURE_QUIET);
+
+  if (next_hvac_settings.sleep.has_value())
+    status[17] = (uint8_t) ((*next_hvac_settings.sleep << 1) | 1);
+  if (next_hvac_settings.turbo.has_value())
+    status[33] |= (uint8_t) (((*next_hvac_settings.turbo ? 1 : 0) << 3) | 0x04);
+  if (next_hvac_settings.eco.has_value())
+    status[33] |= (uint8_t) (((*next_hvac_settings.eco ? 1 : 0) << 5) | 0x10);
+  if (next_hvac_settings.quiet.has_value())
+    status[35] |= (uint8_t) (((*next_hvac_settings.quiet ? 1 : 0) << 5) | 0x10);
+
+  // On timer in bytes 27/28, off timer in 29/30 (straga xm_KTKT / xm_KTGT):
+  //   first byte:  hours << 3 | 0x04 (hours valid) | on << 1 | 0x01 (on valid)
+  //   second byte: minutes << 2 | 0x01 (minutes valid)
+  // The stock app sends a clock time together with the unit clock (bytes 25/26).
+  // The unit reports the time remaining, so the clock is sent as 00:00 and the
+  // timer as the delay: that works whether the unit takes it as a delay or a time.
+  bool timer_sent = false;
+  for (int i = 0; i < 2; i++) {
+    if (!next_hvac_settings.timer[i].has_value())
+      continue;
+    const uint16_t minutes = *next_hvac_settings.timer[i];
+    const size_t b = i == 0 ? 27 : 29;
+    if (minutes == 0) {
+      status[b] = 0x01;  // timer off
+    } else {
+      status[b] = (uint8_t) (((minutes / 60) << 3) | 0x04 | 0x02 | 0x01);
+      status[b + 1] = (uint8_t) (((minutes % 60) << 2) | 0x01);
+      timer_sent = true;
+    }
+  }
+  if (timer_sent) {
+    status[25] = 0x01;  // clock hours = 0, valid
+    status[26] = 0x01;  // clock minutes = 0, valid
+  }
 
   send_raw(status);
   ESP_LOGD(TAG, "send_status");
@@ -400,15 +443,53 @@ void AirConditioner::control(const climate::ClimateCall &call) {
 }
 
 void AirConditioner::set_feature(Feature feature, bool state) {
+  if (feature == Feature::FEATURE_BEEP) {
+    // Not a unit setting: only changes how our own commands are sent.
+    this->beep_enable_ = state;
+    return;
+  }
   auto &next = this->pending_settings_();
   switch (feature) {
     case Feature::FEATURE_DISPLAY:
       next.display = state;
       this->display_enable = state;
       break;
+    case Feature::FEATURE_ECO:
+      next.eco = state;
+      break;
+    case Feature::FEATURE_TURBO:
+      next.turbo = state;
+      break;
+    case Feature::FEATURE_QUIET:
+      next.quiet = state;
+      break;
+    case Feature::FEATURE_SLEEP:
+      next.sleep = state ? this->sleep_profile_ : 0;
+      break;
     default:
       break;
   }
+}
+
+void AirConditioner::set_timer(bool off, uint16_t minutes) {
+  if (minutes > TIMER_MAX_MINUTES)
+    minutes = TIMER_MAX_MINUTES;
+  this->pending_settings_().timer[off ? 1 : 0] = minutes;
+}
+
+void AirConditioner::set_sleep_profile(uint8_t profile, bool send) {
+  if (profile < 1 || profile > SLEEP_PROFILE_COUNT)
+    return;
+  this->sleep_profile_ = profile;
+  if (!send)
+    return;
+  // Apply at once if sleep is on, or about to be switched on by a queued command.
+  bool queued_on = this->next_hvac_settings_.has_value() && this->next_hvac_settings_->sleep.has_value() &&
+                   *this->next_hvac_settings_->sleep != 0;
+  bool queued_off = this->next_hvac_settings_.has_value() && this->next_hvac_settings_->sleep.has_value() &&
+                    *this->next_hvac_settings_->sleep == 0;
+  if (queued_on || (this->sleep_reported_ != 0 && !queued_off))
+    this->pending_settings_().sleep = profile;
 }
 
 void AirConditioner::dump_config() {
@@ -496,6 +577,31 @@ void AirConditioner::decode_message(const std::vector<uint8_t> &payload) {
   this->publish_state();
 
   this->decode_features_(payload);
+  this->decode_faults_(payload);
+#ifdef USE_BINARY_SENSOR
+  // Byte 36 bit 3 (straga's field table: "IR remote or key control before this
+  // command"); bit 2 is the same for Wi-Fi control. Never seen set on product type 104.
+  if (this->remote_used_binary_sensor_ != nullptr && payload.size() > 36)
+    this->remote_used_binary_sensor_->publish_state((payload[36] & 0x08) != 0);
+#endif
+#ifdef USE_NUMBER
+  // On/off timers, as time remaining (also when set with the remote): bytes 28/29
+  // (on) and 30/31 (off). First byte bit 1 = set, bits 7-3 = hours; second byte
+  // bits 7-2 = minutes. The unit counts them down once a minute and acts when they
+  // reach zero. Published in minutes, 0 = not set. The reply to a timer command
+  // can still show the old timers, so only polls are used.
+  if (payload[11] == 0x66 && !(this->next_hvac_settings_.has_value() &&
+                               (this->next_hvac_settings_->timer[0].has_value() ||
+                                this->next_hvac_settings_->timer[1].has_value()))) {
+    for (int i = 0; i < 2; i++) {
+      const size_t b = i == 0 ? 28 : 30;
+      const float v = (payload[b] & 0x02) ? (float) ((payload[b] >> 3) * 60 + (payload[b + 1] >> 2)) : 0.0f;
+      auto *n = this->timer_numbers_[i];
+      if (n != nullptr && (!n->has_state() || n->state != v))
+        n->publish_state(v);
+    }
+  }
+#endif
 
 #ifdef USE_SENSOR
   auto byte_or_nan = [&payload](size_t idx) -> float {
@@ -515,6 +621,27 @@ void AirConditioner::decode_message(const std::vector<uint8_t> &payload) {
   };
   update_sub_sensor_(SubSensorType::OUTDOOR_TEMPERATURE, signed_or_nan(42));
   update_sub_sensor_(SubSensorType::OUTDOOR_COIL_TEMPERATURE, signed_or_nan(43));
+  // Compressor discharge temperature (stock firmware field table; rises with the compressor).
+  update_sub_sensor_(SubSensorType::DISCHARGE_TEMPERATURE, byte_or_nan(44));
+  // Setpoint as reported by the unit (byte 17), as a sensor so its history can be
+  // graphed, e.g. to see whether a sleep curve shows up in the reported setpoint.
+  update_sub_sensor_(SubSensorType::SETPOINT, (float) payload[17]);
+  // Byte 24 bits 7-4: auto/dry temperature compensation (stock firmware
+  // t_temp_compensate; the remote offers -7..+7). Encoding not confirmed: raw value.
+  update_sub_sensor_(SubSensorType::TEMPERATURE_COMPENSATION, (float) (payload[24] >> 4));
+  // Compressor output frequency in Hz (ramps; byte 39 is the target frequency).
+  if (payload.size() > 41)
+    update_sub_sensor_(SubSensorType::COMPRESSOR_FREQUENCY, (float) payload[41]);
+  if (payload.size() > 48)
+    update_sub_sensor_(SubSensorType::SUPPLY_VOLTAGE, (float) ((payload[47] << 8) | payload[48]));
+  // f_electricity in the stock firmware (units not confirmed).
+  if (payload.size() > 143) {
+    // Little-endian: byte 142 is the low byte. It is a copy of bytes 53:54
+    // (big-endian) on the units seen so far, e.g. 53:54 = 06 40, 142:143 = 40 06.
+    uint16_t power = (payload[143] << 8) | payload[142];
+    ESP_LOGV(TAG, "Power raw 0x%04X", power);
+    update_sub_sensor_(SubSensorType::POWER, (float) power);
+  }
 #endif
 }
 
@@ -526,6 +653,33 @@ void AirConditioner::decode_features_(const std::vector<uint8_t> &payload) {
   auto settled = [this, command_reply](Feature f) {
     return !command_reply || !(this->settling_features_ & (1u << static_cast<uint8_t>(f)));
   };
+  if (settled(Feature::FEATURE_SLEEP)) {
+    this->sleep_reported_ = payload[15] >> 1;
+    // While sleep is on, the unit's profile is the one to show (and to reuse).
+    if (this->sleep_reported_ >= 1 && this->sleep_reported_ <= SLEEP_PROFILE_COUNT &&
+        !this->next_hvac_settings_.has_value()) {
+      this->sleep_profile_ = this->sleep_reported_;
+#ifdef USE_SELECT
+      auto *sel = this->sleep_profile_select_;
+      if (sel != nullptr) {
+        auto index = sel->active_index();
+        auto option = sel->at(this->sleep_profile_ - 1);
+        if (option.has_value() && (!sel->has_state() || !index.has_value() || *index != this->sleep_profile_ - 1u))
+          sel->publish_state(*option);
+      }
+#endif
+    }
+  }
+#ifdef USE_SWITCH
+  if (settled(Feature::FEATURE_SLEEP))
+    this->publish_feature_(Feature::FEATURE_SLEEP, (payload[15] >> 1) != 0);
+  if (settled(Feature::FEATURE_TURBO))
+    this->publish_feature_(Feature::FEATURE_TURBO, (payload[33] & 0b00000010) != 0);
+  if (settled(Feature::FEATURE_ECO))
+    this->publish_feature_(Feature::FEATURE_ECO, (payload[33] & 0b00000100) != 0);
+  if (payload.size() > 34 && settled(Feature::FEATURE_QUIET))
+    this->publish_feature_(Feature::FEATURE_QUIET, (payload[34] & 0b00000100) != 0);
+#endif
   if (payload.size() > 35 && !this->next_hvac_settings_.has_value() && settled(Feature::FEATURE_DISPLAY)) {
     // Display on/off is reported in bit 7 of byte 35 (verified live).
     this->display_enable = (payload[35] & 0x80) != 0;
@@ -535,6 +689,50 @@ void AirConditioner::decode_features_(const std::vector<uint8_t> &payload) {
   }
   if (!command_reply)
     this->settling_features_ = 0;
+}
+
+void AirConditioner::decode_faults_(const std::vector<uint8_t> &payload) {
+#ifdef USE_TEXT_SENSOR
+  if (this->faults_text_sensor_ == nullptr)
+    return;
+  struct FaultBit {
+    uint8_t index;
+    uint8_t mask;
+    const char *name;
+  };
+  static const FaultBit FAULTS[] = {
+      {37, 0x80, "indoor temp sensor"},
+      {37, 0x40, "indoor coil sensor"},
+      {37, 0x20, "humidity sensor"},
+      {37, 0x10, "water full"},
+      {37, 0x08, "indoor fan motor"},
+      {37, 0x04, "grille protection"},
+      {37, 0x02, "zero-cross detection"},
+      {37, 0x01, "indoor/outdoor comms"},
+      {38, 0x80, "display board"},
+      {38, 0x40, "keypad"},
+      {38, 0x20, "wifi module"},
+      {38, 0x10, "electrical"},
+      {38, 0x08, "indoor EEPROM"},
+      {62, 0x40, "outdoor EEPROM"},
+      {62, 0x20, "outdoor coil sensor"},
+      {62, 0x10, "discharge temp sensor"},
+      {62, 0x08, "outdoor temp sensor"},
+      {64, 0x10, "over-heat/over-cold protection"},
+  };
+  std::string faults;
+  for (const auto &f : FAULTS) {
+    if (f.index < payload.size() && (payload[f.index] & f.mask)) {
+      if (!faults.empty())
+        faults += ", ";
+      faults += f.name;
+    }
+  }
+  if (faults.empty())
+    faults = "OK";
+  if (!this->faults_text_sensor_->has_state() || this->faults_text_sensor_->get_state() != faults)
+    this->faults_text_sensor_->publish_state(faults);
+#endif
 }
 
 #ifdef USE_SWITCH
