@@ -560,6 +560,9 @@ void AirConditioner::send_status() {
     status[25] = 0x01;  // clock hours = 0, valid
     status[26] = 0x01;  // clock minutes = 0, valid
   }
+  // Byte 37 bit 7 = filter cleaning reminder reset, bit 6 = valid (straga xm_KTGLW).
+  if (next_hvac_settings.filter_reset)
+    status[37] = 0xC0;
 
   send_raw(status);
   ESP_LOGD(TAG, "send_status");
@@ -717,6 +720,10 @@ void AirConditioner::decode_message(const std::vector<uint8_t> &payload) {
   // command"); bit 2 is the same for Wi-Fi control. Never seen set on product type 104.
   if (this->remote_used_binary_sensor_ != nullptr && payload.size() > 36)
     this->remote_used_binary_sensor_->publish_state((payload[36] & 0x08) != 0);
+  // Byte 35 bit 3: indoor filter cleaning reminder (stock firmware f_filter, straga
+  // "indoor filter cleaning reset"). Cleared with reset_filter().
+  if (this->filter_binary_sensor_ != nullptr && payload.size() > 35)
+    this->filter_binary_sensor_->publish_state((payload[35] & 0x08) != 0);
 #endif
 #ifdef USE_NUMBER
   // On/off timers, as time remaining (also when set with the remote): bytes 28/29

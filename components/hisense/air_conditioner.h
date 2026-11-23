@@ -78,7 +78,11 @@ class AirConditioner : public uart::UARTDevice, public Component, public climate
 #ifdef USE_BINARY_SENSOR
   /// Status byte 36 bit 3: the unit was controlled by its IR remote or buttons since the previous command.
   void set_remote_used_binary_sensor(binary_sensor::BinarySensor *s) { this->remote_used_binary_sensor_ = s; }
+  /// Status byte 35 bit 3: the indoor filter needs cleaning (stock firmware f_filter).
+  void set_filter_binary_sensor(binary_sensor::BinarySensor *s) { this->filter_binary_sensor_ = s; }
 #endif
+  /// Clear the unit's filter cleaning reminder (control byte 37).
+  void reset_filter() { this->pending_settings_().filter_reset = true; }
 
   // Sleep profiles reported in status byte 15 (value >> 1) and sent in control
   // byte 17 ((profile << 1) | 1). 0 = sleep off.
@@ -194,6 +198,7 @@ class AirConditioner : public uart::UARTDevice, public Component, public climate
 #endif
 #ifdef USE_BINARY_SENSOR
   binary_sensor::BinarySensor *remote_used_binary_sensor_{nullptr};
+  binary_sensor::BinarySensor *filter_binary_sensor_{nullptr};
 #endif
 #ifdef USE_SELECT
   select::Select *sleep_profile_select_{nullptr};
@@ -220,6 +225,7 @@ class AirConditioner : public uart::UARTDevice, public Component, public climate
     esphome::optional<bool> quiet;
     esphome::optional<uint8_t> sleep;  // sleep profile, 0 = off
     esphome::optional<uint16_t> timer[2];  // on, off: minutes from now, 0 = cancel
+    bool filter_reset{false};
 
     HvacSettings(){};
     HvacSettings(const HvacSettings &) = default;

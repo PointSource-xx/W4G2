@@ -145,6 +145,14 @@ binary_sensor:
     hisense_id: hisense_ac
     remote_used:          # diagnostic: unit was controlled by its IR remote or keys
       name: Remote Used
+    filter:               # on when the unit asks for the indoor filter to be cleaned
+      name: Filter
+
+button:
+  - platform: hisense
+    hisense_id: hisense_ac
+    filter_reset:         # clears the unit's filter cleaning reminder
+      name: Filter Reset
 
 switch:
   - platform: hisense
@@ -188,6 +196,10 @@ with the remote. The unit counts down once a minute, so a timer can fire up to a
 `remote_used` reads status byte 36 bit 3, which other implementations describe as "IR remote
 or key control before this command". It has never been seen set on product type 104 (it stays
 off through remote commands), but may work on other units.
+
+`filter` reads status byte 35 bit 3, the filter reminder the stock module reports to the cloud
+(`f_filter`). `filter_reset` sends control byte 37 = `C0` to clear it, like the remote's filter
+reset. Check the `capabilities` text sensor for "filter reset" to see whether a unit supports it.
 
 `beep` is a local setting, not a unit state: it sets byte 23 bit 2 of the commands sent from
 ESPHome, which asks the unit to beep when it accepts the command (the stock module always sets

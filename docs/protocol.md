@@ -144,11 +144,15 @@ Bits are numbered 7 (MSB) to 0. "This unit" values are from the reference unit.
 | Eco | `P[33]` bit 2 | | FW S K L |
 | Turbo | `P[33]` bit 1 | | FW S K L |
 | Dual mode | `P[33]` bit 0 | | S |
-| Fresh air / air exchange / indoor clean / outdoor clean / smart eye | `P[34]` bits 7-3 | | S |
+| Fresh air / air exchange | `P[34]` bits 7 / 6 | | S |
+| Indoor clean / outdoor clean | `P[34]` bits 5 / 4 | Self-clean running. See [Self-clean](#self-clean) | S |
+| Smart eye | `P[34]` bit 3 | | S |
 | Quiet | `P[34]` bit 2 | | FW S K L |
 | Voice / smoke removal | `P[34]` bits 1 / 0 | | S |
 | Display | `P[35]` bit 7 | Reported off while the unit is off | S K L |
-| Panel / LED / temperature display / filter reset / vanes / power board | `P[35]` bits 6-0 | | S FW |
+| Display glow / LED / indoor-outdoor temperature display | `P[35]` bits 6 / 5 / 4 | | S |
+| Filter reminder | `P[35]` bit 3 | 1 = the indoor filter needs cleaning (stock firmware `f_filter`, reported to the cloud). Cleared with `T[37]`. `0` on the reference unit so far | FW S |
+| Left vane / right vane / power board | `P[35]` bits 2 / 1 / 0 | | S |
 | Remote used | `P[36]` bit 3 | "IR remote or key control before this command". **Never set on the reference unit**, through several remote commands | S K L |
 | Wi-Fi control | `P[36]` bit 2 | Set on this unit | S L |
 | Normal / test model | `P[36]` bit 1 | | S |
@@ -201,7 +205,10 @@ so a command may carry any subset of fields and all other bytes are `00`.
 | Turbo | `T[33]` | `(on << 3) \| 0x04` | FW S K L |
 | Eco | `T[33]` | `(on << 5) \| 0x10` | FW S K L |
 | Quiet | `T[35]` | `(on << 5) \| 0x10` | FW S K L |
+| Indoor clean | `T[34]` | `(on << 3) \| 0x04` (straga `xm_KTQJ`, unverified). See [Self-clean](#self-clean) | S |
+| Outdoor clean | `T[34]` | `(on << 1) \| 0x01` (straga `xm_KTSWQJ`, unverified) | S |
 | Display | `T[36]` | `C0` on, `40` off. Not in the stock command builder | S P L |
+| Filter reminder reset | `T[37]` | `C0` = reset (bit 7 value, bit 6 valid; straga `xm_KTGLW`) | S |
 | Fan percentage | `T[40]` | `(percent << 1) \| 1`, 0-100. Device type 1 maps fan 5..9 to 5/10/50/80/90 % | FW |
 | Swing follow | `T[41]` | `((v << 2) & 0x0C) \| 0x02` | FW |
 | TMS | `T[47]` | `((v << 5) & 0x20) \| 0x10` | FW |
@@ -214,6 +221,15 @@ so a command may carry any subset of fields and all other bytes are `00`.
 those fields is used. The frame length in that case has not been verified.
 
 The stock firmware's command builder is `get_dev_control_cmd` at `0x80648b0`.
+
+### Self-clean
+
+straga defines indoor and outdoor clean commands (`T[34]` above) with their state in `P[34]`
+bits 5 and 4, and capability bits 62 and 63. The stock AEH-W4G2 firmware has no field for them,
+so the Hisense app cannot start a clean through this module. The reference unit reports both
+capability bits as 0. On other Hisense models, indoor clean typically runs a freeze-and-dry
+cycle of the indoor coil for 20-30 minutes and then switches the unit off (user manuals; not
+from the protocol).
 
 ### Timers
 
