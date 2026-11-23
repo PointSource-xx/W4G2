@@ -137,6 +137,8 @@ text_sensor:
       name: Faults
     identity:             # device type, product type, software and protocol version
       name: AC Identity
+    capabilities:         # feature counts and flags from the unit's capability reply
+      name: AC Capabilities
 
 binary_sensor:
   - platform: hisense
@@ -208,6 +210,13 @@ ported from that firmware (`capabilities.h`). These values select:
 
 The result is logged at boot and in `dump_config`. You can also see it with the `identity`
 text sensor. If your unit reports something unexpected, please include that line in issues.
+
+The capability bits are also decoded directly (see [protocol.md](protocol.md#capability-reply))
+and shown, with the `capabilities` text sensor and in the log, as the number of fan speeds,
+sleep profiles and dry modes, the compensation ranges, and the features the unit reports, e.g.
+`fan 9, sleep 4, dry 1, feel +-5, comp +-7, heat pump, power, setpoint, ..., filter reset`.
+They are not used to hide entities: on one unit, left-right swing is reported as unsupported but
+still echoed back.
 
 ## LibreTiny (RTL8710BN) UART issues: handled by the component
 

@@ -73,6 +73,7 @@ class AirConditioner : public uart::UARTDevice, public Component, public climate
 #ifdef USE_TEXT_SENSOR
   void set_faults_text_sensor(text_sensor::TextSensor *s) { this->faults_text_sensor_ = s; }
   void set_identity_text_sensor(text_sensor::TextSensor *s) { this->identity_text_sensor_ = s; }
+  void set_capabilities_text_sensor(text_sensor::TextSensor *s) { this->capabilities_text_sensor_ = s; }
 #endif
 #ifdef USE_BINARY_SENSOR
   /// Status byte 36 bit 3: the unit was controlled by its IR remote or buttons since the previous command.
@@ -189,6 +190,7 @@ class AirConditioner : public uart::UARTDevice, public Component, public climate
 #ifdef USE_TEXT_SENSOR
   text_sensor::TextSensor *faults_text_sensor_{nullptr};
   text_sensor::TextSensor *identity_text_sensor_{nullptr};
+  text_sensor::TextSensor *capabilities_text_sensor_{nullptr};
 #endif
 #ifdef USE_BINARY_SENSOR
   binary_sensor::BinarySensor *remote_used_binary_sensor_{nullptr};

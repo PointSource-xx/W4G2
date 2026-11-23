@@ -18,6 +18,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <string>
 #include <initializer_list>
 
 namespace esphome {
@@ -84,12 +86,64 @@ inline bool product_in(int product, std::initializer_list<int> list) {
   return false;
 }
 
+// Feature bits of the capability reply (66 40), counted MSB first from its first
+// data byte (frame byte 16), as in straga's xm_KTGN table. Single-bit flags only;
+// the multi-bit counts are decoded in HisenseCapabilities.
+struct CapabilityFeature {
+  uint8_t bit;
+  const char *name;
+};
+static const CapabilityFeature CAPABILITY_FEATURES[] = {
+    {16, "heat pump"},       {17, "power"},          {18, "single vane"},     {19, "setpoint"},
+    {20, "humidity setpoint"}, {21, "feel temp"},     {22, "feel comp"},       {23, "auto/dry comp"},
+    {40, "F/C"},             {41, "countdown timer"}, {42, "clock timers"},    {43, "6-pos vane"},
+    {44, "up/down swing"},   {45, "left/right swing"}, {46, "natural wind"},   {47, "electric heat"},
+    {56, "energy saving"},   {57, "eco"},            {58, "turbo"},           {59, "dual mode"},
+    {60, "fresh air"},       {61, "air exchange"},   {62, "indoor clean"},    {63, "outdoor clean"},
+    {64, "smart eye"},       {65, "quiet"},          {66, "voice"},           {67, "smoke removal"},
+    {68, "backlight"},       {69, "display glow"},   {70, "LED"},             {71, "in/out temp display"},
+    {72, "filter reset"},    {73, "left vane"},      {74, "right vane"},      {79, "VOC"},
+    {80, "power saver"},
+};
+
 struct HisenseCapabilities {
   uint8_t device_type{0};   // 0 = unknown
   uint8_t device_subtype{0};
   int product_type{-1};     // -1 = unknown
   uint16_t software_version{0};
   uint16_t protocol_version{0};  // 0 = unknown
+  // Capability reply data bytes (from frame byte 16), straga XM_KT_SUPPORT_LEN = 17.
+  static const uint8_t SUPPORT_LEN = 17;
+  uint8_t support[SUPPORT_LEN]{};
+  uint8_t support_len{0};  // 0 = no capability reply
+
+  /// Capability bit (MSB first from the first data byte).
+  bool has(uint8_t bit) const {
+    const uint8_t i = bit / 8;
+    return i < support_len && ((support[i] >> (7 - bit % 8)) & 1);
+  }
+  uint8_t support_byte(uint8_t i) const { return i < support_len ? support[i] : 0; }
+  uint8_t fan_levels() const { return support_byte(0); }
+  uint8_t sleep_profiles() const { return support_byte(1); }
+  uint8_t feel_compensation_range() const { return support_byte(3); }
+  uint8_t auto_dry_compensation_range() const { return support_byte(4); }
+  uint8_t dry_modes() const { return support_byte(6); }
+  /// Short summary: counts, then the supported feature flags.
+  std::string summary() const {
+    if (support_len == 0)
+      return "unknown";
+    char buf[96];
+    snprintf(buf, sizeof(buf), "fan %u, sleep %u, dry %u, feel +-%u, comp +-%u", fan_levels(), sleep_profiles(),
+             dry_modes(), feel_compensation_range(), auto_dry_compensation_range());
+    std::string s = buf;
+    for (const auto &f : CAPABILITY_FEATURES) {
+      if (has(f.bit)) {
+        s += ", ";
+        s += f.name;
+      }
+    }
+    return s;
+  }
 
   bool is_supported_device() const {
     return device_type == 0 || device_type == 1 || device_type == 54 || device_type == 55;

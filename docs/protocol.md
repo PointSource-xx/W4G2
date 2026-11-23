@@ -265,6 +265,41 @@ once at boot. Data shown from `cmd`; frame: `F4 F5 00 40 0B 00 00 01 01 FE 01 00
 | Device type | `0A 04 00` | `0A 04 01 01 01` | Type 1 / subtype 1 = air conditioner (21 = dehumidifier) | FW L |
 | Capabilities | `66 40 00` | `66 40 01 09 04 D6 05 07 EA 01 70 48 80 80 00 …` | Capability bits, decoded to a product type (104 here) | FW L |
 
+### Capability reply
+
+The data of the `66 40` reply is a bitmap of the unit's features (straga `xm_KTGN`, 17 bytes).
+Bits are numbered MSB first from the first data byte, `P[14]` (frame byte 16), the same way as
+the status fields: bit `b` is bit `7 - b % 8` of `P[14 + b / 8]`. The stock firmware reduces it to
+a product type (below); the component also decodes it directly. The reference unit replies
+`09 04 D6 05 07 EA 01 70 48 80 80 00 …`.
+
+| Bits | Field | Reference unit | Source |
+|---|---|---|---|
+| 0-7 (`P[14]`) | Number of fan speed levels | 9 | S L |
+| 8-15 (`P[15]`) | Number of sleep profiles | 4 (matches the 4 profiles found live) | S L |
+| 16 | Heat pump (0 = cooling only) | 1 | S L |
+| 17 / 18 / 19 / 20 | Power / single vane direction / setpoint / humidity setpoint | 1 / 0 / 1 / 0 | S L |
+| 21 / 22 / 23 | "Feel" temperature / feel compensation / auto and dry mode compensation | 1 / 1 / 0 | S L |
+| 24-31 (`P[17]`) | Feel compensation range (±) | 5 | S |
+| 32-39 (`P[18]`) | Auto/dry compensation range (±) | 7 (the remote offers −7..+7) | S L |
+| 40 / 41 / 42 | °F/°C / countdown timer / clock timers | 1 / 1 / 1 | S L |
+| 43 / 44 / 45 | 6-position vane / up-down swing / left-right swing | 0 / 1 / 0 | S L |
+| 46 / 47 | Natural wind / electric heater | 1 / 0 | S |
+| 48-55 (`P[20]`) | Number of dry modes | 1 | S |
+| 56 / 57 / 58 / 59 | Energy saving / eco ("combined power saving") / turbo / dual mode | 0 / 1 / 1 / 1 | S L |
+| 60 / 61 | Fresh air / air exchange | 0 / 0 | S |
+| 62 / 63 | Indoor clean / outdoor clean | 0 / 0 | S |
+| 64 / 65 / 66 / 67 | Smart eye / quiet / voice / smoke removal | 0 / 1 / 0 / 0 | S L |
+| 68 / 69 / 70 / 71 | Backlight / display glow / LED / indoor-outdoor temperature display | 1 / 0 / 0 / 0 | S L |
+| 72 | Filter reminder reset | 1 | S |
+| 73 / 74 | Left vane / right vane | 0 / 0 | S |
+| 75-78 | Reserved / "Hisense or Kelon control rules" (bit 78) | 0 | S |
+| 79 / 80 | VOC sensor / power saver (straga version 02.15) | 0 / 1 | S |
+
+On the reference unit the flags agree with what works (eco, turbo, quiet, timers, the backlight
+switch, 4 sleep profiles). Two do not: left-right swing is 0, but the unit reports `P[33]` bit 6
+back when it is sent, and auto/dry compensation is 0, but `P[24] >> 4` reads 6 or 8 in cool mode.
+
 ### Product-type gates
 
 The stock firmware turns the capability bits into a "product type" that selects the app's

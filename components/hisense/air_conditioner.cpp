@@ -254,6 +254,7 @@ void AirConditioner::dump_config() {
   ESP_LOGCONFIG(TAG, "  Software: %u, protocol: %u", c.software_version, c.protocol_version);
   ESP_LOGCONFIG(TAG, "  Fan speeds: %u%s", this->three_speed_fan_() ? 3 : 5,
                 this->fan_speeds_config_ ? " (configured)" : "");
+  ESP_LOGCONFIG(TAG, "  Capabilities: %s", c.summary().c_str());
 }
 
 void AirConditioner::send_identity_query_() {
@@ -286,6 +287,9 @@ bool AirConditioner::handle_identity_reply_(const std::vector<uint8_t> &payload)
   } else if (cmd == 0x66 && sub == 0x40) {
     const uint8_t dev = c.device_type ? c.device_type : 1;
     c.product_type = decode_product_type(dev, payload.data() + 11, payload.size() - 11);
+    c.support_len = 0;
+    for (size_t i = 14; i < payload.size() && c.support_len < HisenseCapabilities::SUPPORT_LEN; i++)
+      c.support[c.support_len++] = payload[i];
     step = 2;
   } else {
     return false;
@@ -303,6 +307,7 @@ void AirConditioner::identity_done_() {
   this->update_custom_fan_modes_();
   ESP_LOGI(TAG, "Unit: device type %u/%u, product type %d, software %u, protocol %u, %u fan speeds", c.device_type,
            c.device_subtype, c.product_type, c.software_version, c.protocol_version, this->three_speed_fan_() ? 3 : 5);
+  ESP_LOGI(TAG, "Capabilities: %s", c.summary().c_str());
   if (!c.is_supported_device())
     ESP_LOGW(TAG, "Device type %u is not an air conditioner this component supports", c.device_type);
 #ifdef USE_TEXT_SENSOR
@@ -311,6 +316,12 @@ void AirConditioner::identity_done_() {
     snprintf(buf, sizeof(buf), "type %u/%u, product %d, sw %u, protocol %u", c.device_type, c.device_subtype,
              c.product_type, c.software_version, c.protocol_version);
     this->identity_text_sensor_->publish_state(buf);
+  }
+  if (this->capabilities_text_sensor_ != nullptr) {
+    std::string s = c.summary();
+    if (s.size() > 255)  // Home Assistant state limit
+      s.resize(255);
+    this->capabilities_text_sensor_->publish_state(s);
   }
 #endif
 }
