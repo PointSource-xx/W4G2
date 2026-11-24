@@ -923,8 +923,9 @@ void AirConditioner::update_sub_sensor_(SubSensorType type, float value) {
 #endif
 
 void AirConditioner::change_status(Status new_status) {
-  if (new_status != this->status)
+  if (new_status != this->status) {
     ESP_LOGV(TAG, "Status %d -> %d", (int) this->status, (int) new_status);
+  }
   this->status = new_status;
   last_status_change = millis();
 }

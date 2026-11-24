@@ -1,16 +1,10 @@
-from typing import Literal
-
 import esphome.codegen as cg
 import esphome.config_validation as cv
-import esphome.final_validate as fv
 from esphome.cpp_helpers import gpio_pin_expression
-from esphome.components import climate, sensor, uart, remote_transmitter, switch
+from esphome.components import climate, uart
 from esphome.const import (
     CONF_FLOW_CONTROL_PIN,
     CONF_ID,
-    CONF_ADDRESS,
-    CONF_DISABLE_CRC,
-    CONF_DISPLAY,
 )
 from esphome import pins
 
